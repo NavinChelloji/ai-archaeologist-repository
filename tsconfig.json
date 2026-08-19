@@ -1,0 +1,10 @@
+{
+  "extends": "@aca/tsconfig/nestjs.json",
+  "compilerOptions": {
+    "baseUrl": "./",
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "coverage", "src/**/*.test.ts"]
+}
