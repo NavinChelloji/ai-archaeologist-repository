@@ -3,7 +3,15 @@
   "compilerOptions": {
     "baseUrl": "./",
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // `nest start --watch` clears dist/ on every startup but TypeScript's
+    // incremental cache (tsconfig.tsbuildinfo) doesn't know that — it trusts
+    // its record that files were already emitted and skips re-emitting them,
+    // so the very first watch compile writes nothing and `node dist/main`
+    // fails with MODULE_NOT_FOUND. Disabling incremental here costs some
+    // rebuild speed (pnpm typecheck's own caching is affected too) but
+    // trades it for `nest start`/`nest build` actually working.
+    "incremental": false
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "coverage", "src/**/*.test.ts"]

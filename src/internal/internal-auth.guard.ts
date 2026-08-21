@@ -24,7 +24,7 @@ export class InternalAuthGuard implements CanActivate {
     }
 
     try {
-      request.internalClaims = this.tokens.verify(header.slice(BEARER_PREFIX.length));
+      request.internalClaims = this.tokens.verify(header.slice(BEARER_PREFIX.length), "indexer");
       return true;
     } catch {
       throw new UnauthorizedException({ code: "INTERNAL_TOKEN_INVALID" });

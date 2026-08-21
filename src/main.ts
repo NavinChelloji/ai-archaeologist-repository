@@ -1,8 +1,14 @@
 import "reflect-metadata";
+import { config } from "dotenv";
+import { randomUUID } from "node:crypto";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { AppModule } from "./app.module";
 import { loadIndexerEnv } from "./config/env";
+
+config();
+
+const CORRELATION_ID_HEADER = "x-correlation-id";
 
 /**
  * `indexer` is CPU-heavy and bursty (CODEBASE.md "Why these boundaries"),
@@ -26,6 +32,13 @@ async function bootstrap(): Promise<void> {
   const env = loadIndexerEnv();
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter(), {
     bufferLogs: true,
+  });
+
+  const fastify = app.getHttpAdapter().getInstance();
+  fastify.addHook("onRequest", async (request, reply) => {
+    const header = request.headers[CORRELATION_ID_HEADER];
+    request.correlationId = typeof header === "string" && header.length > 0 ? header : randomUUID();
+    reply.header(CORRELATION_ID_HEADER, request.correlationId);
   });
 
   app.enableShutdownHooks();
