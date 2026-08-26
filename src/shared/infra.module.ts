@@ -5,6 +5,7 @@ import Redis from "ioredis";
 import { createPool } from "@aca/db";
 import { attachErrorLogging, createBoss, startBoss, stopBoss } from "@aca/queue";
 import { createLogger } from "@aca/logger";
+import { createS3Client } from "@aca/storage";
 import { ConfigModule, APP_CONFIG } from "../config/config.module";
 import type { IndexerEnv } from "../config/env";
 
@@ -12,6 +13,7 @@ export const PG_POOL = Symbol("PG_POOL");
 export const REDIS_CLIENT = Symbol("REDIS_CLIENT");
 export const PG_BOSS = Symbol("PG_BOSS");
 export const APP_LOGGER = Symbol("APP_LOGGER");
+export const S3_CLIENT = Symbol("S3_CLIENT");
 
 /**
  * Wires the three infra dependencies every deployable needs — its own
@@ -43,8 +45,20 @@ export const APP_LOGGER = Symbol("APP_LOGGER");
         return boss;
       },
     },
+    {
+      provide: S3_CLIENT,
+      inject: [APP_CONFIG],
+      useFactory: (config: IndexerEnv) =>
+        createS3Client({
+          endpoint: config.S3_ENDPOINT,
+          region: config.S3_REGION,
+          accessKeyId: config.S3_ACCESS_KEY_ID,
+          secretAccessKey: config.S3_SECRET_ACCESS_KEY,
+          forcePathStyle: config.S3_FORCE_PATH_STYLE,
+        }),
+    },
   ],
-  exports: [PG_POOL, REDIS_CLIENT, PG_BOSS, APP_LOGGER],
+  exports: [PG_POOL, REDIS_CLIENT, PG_BOSS, APP_LOGGER, S3_CLIENT],
 })
 export class InfraModule implements OnModuleInit, OnModuleDestroy {
   constructor(

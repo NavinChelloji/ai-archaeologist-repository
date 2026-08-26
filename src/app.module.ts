@@ -8,9 +8,21 @@ import { InternalModule } from "./internal/internal.module";
 import { SystemModule } from "./modules/system/system.module";
 import { RepositoriesModule } from "./modules/repositories/repositories.module";
 import { PipelineModule } from "./modules/pipeline/pipeline.module";
+import { ParserModule } from "./modules/parser/parser.module";
+import { GraphModule } from "./modules/graph/graph.module";
 
 @Module({
-  imports: [ConfigModule, InfraModule, HealthModule, InternalModule, SystemModule, RepositoriesModule, PipelineModule],
+  imports: [
+    ConfigModule,
+    InfraModule,
+    HealthModule,
+    InternalModule,
+    SystemModule,
+    RepositoriesModule,
+    PipelineModule,
+    ParserModule,
+    GraphModule,
+  ],
   providers: [{ provide: APP_FILTER, useClass: AllExceptionsFilter }],
 })
 export class AppModule {}
