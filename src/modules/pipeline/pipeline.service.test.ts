@@ -310,6 +310,122 @@ describe("PipelineService", () => {
     expect(job.current_stage).toBe("graphing");
   });
 
+  it("records parsing terminals that arrive before the job has even reached extracting, without dropping them or jumping stages", async () => {
+    // Regression test: Pipeline and the Graph module each consume repo.symbols.extracted /
+    // repo.dependencies.extracted independently (@aca/queue fan-out), so pg-boss gives no guarantee
+    // these arrive at Pipeline *after* repo.files.indexed has been processed and advanced the job to
+    // "parsing" — they can legitimately arrive while the job is still "snapshotting" or "extracting".
+    await harness.service.handleImportRequested(envelope("repo.import.requested", importPayload));
+    const job = [...harness.jobsRepo.jobs.values()][0]!;
+    expect(job.current_stage).toBe("snapshotting");
+
+    await harness.service.handleDependenciesExtracted(
+      envelope("repo.dependencies.extracted", {
+        commitSha: "abc123",
+        edgeCount: 3,
+        languageSupported: true,
+        byResolution: { resolved: 3, external: 0, unresolved: 0, dynamic_unresolvable: 0 },
+        ...stageProgress({ stage: "parsing" }),
+      })
+    );
+    await harness.service.handleSymbolsExtracted(
+      envelope("repo.symbols.extracted", {
+        commitSha: "abc123",
+        symbolCount: 5,
+        languageSupported: true,
+        byType: { class: 1, interface: 0, function: 4, method: 0, type: 0, enum: 0, variable: 0 },
+        ...stageProgress({ stage: "parsing" }),
+      })
+    );
+
+    // Neither event was dropped...
+    expect(harness.stageEventsRepo.events.some((e) => e.event_type === "repo.dependencies.extracted")).toBe(true);
+    expect(harness.stageEventsRepo.events.some((e) => e.event_type === "repo.symbols.extracted")).toBe(true);
+    // ...but the job did not jump straight to "graphing" from "snapshotting".
+    expect(job.current_stage).toBe("snapshotting");
+
+    // The normal snapshotting -> extracting -> parsing chain now runs...
+    const snapshotId = "123e4567-e89b-12d3-a456-426614174099";
+    await harness.service.handleSnapshotCreated(
+      envelope(
+        "repo.snapshot.created",
+        { commitSha: "abc123", ref: "main", archiveKey: "key", sizeBytes: 100, reused: false, ...stageProgress() },
+        { snapshotId }
+      )
+    );
+    expect(job.current_stage).toBe("extracting");
+
+    await harness.service.handleFilesIndexed(
+      envelope("repo.files.indexed", {
+        commitSha: "abc123",
+        manifestKey: "manifest.json",
+        fileCount: 10,
+        skippedCount: 0,
+        skippedReasons: { ignored: 0, binary: 0, too_large: 0, excluded_secret: 0, generated: 0 },
+        languages: {},
+        ...stageProgress({ stage: "extracting" }),
+      })
+    );
+
+    // ...and lands directly on "graphing", since both parsing terminals were already recorded.
+    expect(job.current_stage).toBe("graphing");
+  });
+
+  it("cascades graphing -> embedding when repo.graph.built arrived before the job reached graphing", async () => {
+    // Same class of race as above: the Graph module builds independently of Pipeline and may publish
+    // repo.graph.built before Pipeline's own parsing-terminal handling has advanced the job to "graphing".
+    await harness.service.handleImportRequested(envelope("repo.import.requested", importPayload));
+    const job = [...harness.jobsRepo.jobs.values()][0]!;
+    job.current_stage = "parsing";
+    job.status = "running";
+
+    await harness.stageEventsRepo.record({
+      jobId: job.id,
+      stage: "extracting",
+      eventType: "repo.files.indexed",
+      payload: { manifestKey: "manifest.json", fileCount: 10 },
+    });
+
+    await harness.service.handleGraphBuilt(
+      envelope("repo.graph.built", {
+        commitSha: "abc123",
+        graphs: { folder: { nodes: 1, edges: 0 }, dependency: { nodes: 1, edges: 0 }, symbol: { nodes: 1, edges: 0 } },
+        ...stageProgress({ stage: "graphing" }),
+      })
+    );
+
+    // Recorded, but not acted on yet — the job is still "parsing", not "graphing".
+    expect(job.current_stage).toBe("parsing");
+    expect(harness.send).not.toHaveBeenCalledWith("repo.index.requested", expect.anything(), expect.anything());
+
+    await harness.service.handleDependenciesExtracted(
+      envelope("repo.dependencies.extracted", {
+        commitSha: "abc123",
+        edgeCount: 3,
+        languageSupported: true,
+        byResolution: { resolved: 3, external: 0, unresolved: 0, dynamic_unresolvable: 0 },
+        ...stageProgress({ stage: "parsing" }),
+      })
+    );
+    await harness.service.handleSymbolsExtracted(
+      envelope("repo.symbols.extracted", {
+        commitSha: "abc123",
+        symbolCount: 5,
+        languageSupported: true,
+        byType: { class: 1, interface: 0, function: 4, method: 0, type: 0, enum: 0, variable: 0 },
+        ...stageProgress({ stage: "parsing" }),
+      })
+    );
+
+    // Reaching "graphing" now immediately cascades into "embedding" since repo.graph.built was already recorded.
+    expect(job.current_stage).toBe("embedding");
+    expect(harness.send).toHaveBeenCalledWith(
+      "repo.index.requested",
+      expect.objectContaining({ payload: expect.objectContaining({ manifestKey: "manifest.json" }) }),
+      {}
+    );
+  });
+
   it("requests embeddings from ai when graphing completes", async () => {
     await harness.service.handleImportRequested(envelope("repo.import.requested", importPayload));
     const job = [...harness.jobsRepo.jobs.values()][0]!;

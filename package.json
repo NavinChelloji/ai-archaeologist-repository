@@ -18,6 +18,7 @@
     "@aca/db": "workspace:*",
     "@aca/logger": "workspace:*",
     "@aca/queue": "workspace:*",
+    "@aca/storage": "workspace:*",
     "@nestjs/common": "^11.2.1",
     "@nestjs/core": "^11.2.1",
     "@nestjs/platform-fastify": "^11.2.1",
@@ -29,6 +30,8 @@
     "pg-boss": "^10.4.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "tar-stream": "^3.1.7",
+    "typescript": "^5.5.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -39,7 +42,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
-    "typescript": "^5.5.0",
+    "@types/tar-stream": "^3.1.4",
     "vitest": "^4.1.11"
   }
 }

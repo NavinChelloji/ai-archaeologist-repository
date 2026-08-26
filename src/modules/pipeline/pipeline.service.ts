@@ -86,17 +86,22 @@ export class PipelineService {
   }
 
   async handleSnapshotCreated(envelope: TypedEnvelope<"repo.snapshot.created">): Promise<void> {
-    const job = await this.matchActiveJob(envelope, "snapshotting");
+    const job = await this.findActiveJobForBookkeeping(envelope);
     if (!job) return;
 
     await this.recordAndMaybeAdvance(job, envelope, "snapshotting", "extracting", envelope.snapshotId);
   }
 
   async handleFilesIndexed(envelope: TypedEnvelope<"repo.files.indexed">): Promise<void> {
-    const job = await this.matchActiveJob(envelope, "extracting");
+    const job = await this.findActiveJobForBookkeeping(envelope);
     if (!job) return;
 
-    await this.recordAndMaybeAdvance(job, envelope, "extracting", "parsing");
+    const advanced = await this.recordAndMaybeAdvance(job, envelope, "extracting", "parsing");
+    if (!advanced) return;
+
+    // Both parsing terminals may have already arrived and been recorded while the job was still
+    // "extracting" (pg-boss gives no cross-queue ordering guarantee — see handleParsingTerminal).
+    await this.tryAdvancePastParsing(job);
   }
 
   async handleSymbolsExtracted(envelope: TypedEnvelope<"repo.symbols.extracted">): Promise<void> {
@@ -108,17 +113,17 @@ export class PipelineService {
   }
 
   async handleGraphBuilt(envelope: TypedEnvelope<"repo.graph.built">): Promise<void> {
-    const job = await this.matchActiveJob(envelope, "graphing");
+    const job = await this.findActiveJobForBookkeeping(envelope);
     if (!job) return;
 
     const advanced = await this.recordAndMaybeAdvance(job, envelope, "graphing", "embedding");
     if (!advanced) return;
 
-    await this.requestEmbeddings(job, envelope);
+    await this.requestEmbeddings(job, envelope.payload.commitSha, envelope.eventId);
   }
 
   async handleEmbeddingsCompleted(envelope: TypedEnvelope<"repo.embeddings.completed">): Promise<void> {
-    const job = await this.matchActiveJob(envelope, "embedding");
+    const job = await this.findActiveJobForBookkeeping(envelope);
     if (!job) return;
 
     await this.stageEvents.record({
@@ -132,7 +137,14 @@ export class PipelineService {
     });
 
     if (!this.isTerminalBatch(envelope.payload)) {
-      await this.jobs.updateProgress(job.id, interpolateProgress("embedding", envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      if (job.current_stage === "embedding") {
+        await this.jobs.updateProgress(job.id, interpolateProgress("embedding", envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      }
+      return;
+    }
+
+    if (job.current_stage !== "embedding") {
+      this.logger.info({ jobId: job.id, actualStage: job.current_stage }, "recorded repo.embeddings.completed ahead of the job reaching embedding");
       return;
     }
 
@@ -220,24 +232,36 @@ export class PipelineService {
     return payload.batchIndex === payload.batchCount - 1;
   }
 
-  /** Finds the active job for this envelope's repo, skipping (idempotently) if it isn't currently in the expected stage. */
-  private async matchActiveJob(
-    envelope: { repoId: string | null; eventType: string },
-    expectedStage: JobStage
-  ): Promise<ProcessingJobRow | null> {
+  /**
+   * Finds the active (queued/running) job for this envelope's repo,
+   * without regard to its current stage — stage-appropriateness is decided
+   * separately by whichever caller records against it (`recordAndMaybeAdvance`,
+   * `handleParsingTerminal`), since pg-boss gives no ordering guarantee
+   * between the independent queues these events travel on and an event for
+   * a not-yet-reached or already-passed stage is still real bookkeeping
+   * that must not be silently dropped.
+   */
+  private async findActiveJobForBookkeeping(envelope: { repoId: string | null; eventType: string }): Promise<ProcessingJobRow | null> {
     const repoId = this.requireRepoId(envelope);
     const job = await this.jobs.findActiveByRepoId(repoId);
-    if (!job || job.current_stage !== expectedStage) {
-      this.logger.info(
-        { repoId, eventType: envelope.eventType, expectedStage, actualStage: job?.current_stage },
-        "no matching active job for this stage event, skipping"
-      );
+    if (!job) {
+      this.logger.info({ repoId, eventType: envelope.eventType }, "no active job for this stage event, skipping");
       return null;
     }
     return job;
   }
 
   /** Logs the event; on its terminal batch, advances to `toStage` and returns true. Returns false otherwise. */
+  /**
+   * Records the event unconditionally (bookkeeping must never be dropped),
+   * then advances `fromStage` -> `toStage` only if the job is actually
+   * still at `fromStage`. If it's already moved past that (a different,
+   * independent consumer got there first, or this event itself arrived
+   * late), the advance is skipped — not re-applied, not treated as an
+   * error — since someone else already did it or will. Returns whether it
+   * advanced *this call*, not whether the job is now at `toStage` by some
+   * other route.
+   */
   private async recordAndMaybeAdvance(
     job: ProcessingJobRow,
     envelope: TypedEnvelope<JobName> & { payload: BatchedPayload },
@@ -259,7 +283,17 @@ export class PipelineService {
     });
 
     if (!this.isTerminalBatch(envelope.payload)) {
-      await this.jobs.updateProgress(job.id, interpolateProgress(fromStage, envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      if (job.current_stage === fromStage) {
+        await this.jobs.updateProgress(job.id, interpolateProgress(fromStage, envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      }
+      return false;
+    }
+
+    if (job.current_stage !== fromStage) {
+      this.logger.info(
+        { jobId: job.id, expectedStage: fromStage, actualStage: job.current_stage },
+        "recorded a stage event whose transition was already applied via a different path"
+      );
       return false;
     }
 
@@ -267,11 +301,24 @@ export class PipelineService {
     return true;
   }
 
-  /** `repo.symbols.extracted` and `repo.dependencies.extracted` are both terminal-for-parsing; advance only once both have arrived (order-independent). */
+  /**
+   * `repo.symbols.extracted` and `repo.dependencies.extracted` are both
+   * terminal-for-parsing; advance only once both have arrived
+   * (order-independent). Pipeline and the Graph module each consume their
+   * own fan-out copy of these events completely independently (`@aca/queue`
+   * FANOUT_QUEUES), and pg-boss gives no ordering guarantee *between*
+   * queues — so a terminal can legitimately arrive here before Pipeline has
+   * even processed `repo.files.indexed` and advanced the job into
+   * "parsing" yet. It's still recorded (bookkeeping must never be dropped —
+   * `requestEmbeddings` depends on `repo.files.indexed` having been
+   * recorded, for example), just not used to advance the stage until the
+   * job has actually reached "parsing" — see `handleFilesIndexed`'s call to
+   * `tryAdvancePastParsing` for the other half of this.
+   */
   private async handleParsingTerminal(
     envelope: TypedEnvelope<"repo.symbols.extracted" | "repo.dependencies.extracted">
   ): Promise<void> {
-    const job = await this.matchActiveJob(envelope, "parsing");
+    const job = await this.findActiveJobForBookkeeping(envelope);
     if (!job) return;
 
     await this.stageEvents.record({
@@ -285,10 +332,22 @@ export class PipelineService {
     });
 
     if (!this.isTerminalBatch(envelope.payload)) {
-      await this.jobs.updateProgress(job.id, interpolateProgress("parsing", envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      if (job.current_stage === "parsing") {
+        await this.jobs.updateProgress(job.id, interpolateProgress("parsing", envelope.payload.itemsProcessed, envelope.payload.totalItems));
+      }
       return;
     }
 
+    if (job.current_stage !== "parsing") {
+      this.logger.info({ jobId: job.id, actualStage: job.current_stage }, "recorded a parsing terminal event ahead of the job reaching parsing");
+      return;
+    }
+
+    await this.tryAdvancePastParsing(job);
+  }
+
+  /** Advances "parsing" -> "graphing" iff both parsing terminals are recorded and terminal — called both from the transition into "parsing" and from each terminal handler, since either can be the one that completes the pair. */
+  private async tryAdvancePastParsing(job: ProcessingJobRow): Promise<void> {
     const symbols = await this.stageEvents.findLatestByEventType(job.id, "repo.symbols.extracted");
     const dependencies = await this.stageEvents.findLatestByEventType(job.id, "repo.dependencies.extracted");
     const bothTerminal =
@@ -301,9 +360,27 @@ export class PipelineService {
     }
 
     await this.enterStage(job.id, job.repo_id, "graphing");
+    // repo.graph.built is published by a fully independent consumer of these same three events (the
+    // Graph module) and may already have arrived — and been recorded but not acted on — before this job
+    // reached "graphing" itself, for the identical cross-queue-ordering reason.
+    await this.tryAdvancePastGraphing(job);
   }
 
-  private async requestEmbeddings(job: ProcessingJobRow, envelope: TypedEnvelope<"repo.graph.built">): Promise<void> {
+  /** Advances "graphing" -> "embedding" and requests embeddings iff repo.graph.built is already recorded and terminal. */
+  private async tryAdvancePastGraphing(job: ProcessingJobRow): Promise<void> {
+    const graphBuilt = await this.stageEvents.findLatestByEventType(job.id, "repo.graph.built");
+    if (!graphBuilt || !this.isTerminalBatch(graphBuilt.payload as unknown as BatchedPayload)) return;
+
+    await this.enterStage(job.id, job.repo_id, "embedding");
+    const commitSha = (graphBuilt.payload as { commitSha?: string }).commitSha;
+    if (!commitSha) {
+      this.logger.error({ jobId: job.id }, "recorded repo.graph.built has no commitSha, cannot request embeddings");
+      return;
+    }
+    await this.requestEmbeddings(job, commitSha, randomUUID());
+  }
+
+  private async requestEmbeddings(job: ProcessingJobRow, commitSha: string, causationId: string): Promise<void> {
     const filesIndexed = await this.stageEvents.findLatestByEventType(job.id, "repo.files.indexed");
     const manifestKey = (filesIndexed?.payload as { manifestKey?: string } | undefined)?.manifestKey;
     if (!manifestKey) {
@@ -316,12 +393,12 @@ export class PipelineService {
     await publishJob(this.boss, {
       eventType: "repo.index.requested",
       payload: {
-        commitSha: envelope.payload.commitSha,
+        commitSha,
         manifestKey,
         previousSnapshotId: repository.activeSnapshotId,
       },
       correlationId: job.correlation_id,
-      causationId: envelope.eventId,
+      causationId,
       userId: job.requested_by,
       repoId: job.repo_id,
       snapshotId: job.snapshot_id,
