@@ -3,8 +3,10 @@ import { config } from "dotenv";
 import { randomUUID } from "node:crypto";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
+import type { HttpMetrics } from "@aca/metrics";
 import { AppModule } from "./app.module";
 import { loadIndexerEnv } from "./config/env";
+import { HTTP_METRICS } from "./shared/metrics/metrics.module";
 
 config();
 
@@ -39,6 +41,14 @@ async function bootstrap(): Promise<void> {
     const header = request.headers[CORRELATION_ID_HEADER];
     request.correlationId = typeof header === "string" && header.length > 0 ? header : randomUUID();
     reply.header(CORRELATION_ID_HEADER, request.correlationId);
+  });
+
+  const httpMetrics = app.get<HttpMetrics>(HTTP_METRICS);
+  fastify.addHook("onResponse", async (request, reply) => {
+    const route = request.routeOptions?.url ?? request.url;
+    const labels = { method: request.method, route, status_code: String(reply.statusCode) };
+    httpMetrics.requestsTotal.inc(labels);
+    httpMetrics.requestDuration.observe(labels, reply.elapsedTime / 1000);
   });
 
   app.enableShutdownHooks();

@@ -184,4 +184,28 @@ export class ProcessingJobsRepository {
       [olderThan]
     );
   }
+
+  /** Oldest still-in-flight job, for the "job age" gauge (RULES.md #15) — an old queued/running job is the clearest sign the pipeline is stuck. */
+  async findOldestActive(): Promise<ProcessingJobRow | null> {
+    const rows = await query<ProcessingJobRow>(
+      this.pool,
+      "SELECT * FROM processing_jobs WHERE status IN ('queued','running') ORDER BY created_at ASC LIMIT 1"
+    );
+    return rows[0] ?? null;
+  }
+
+  /**
+   * `JOB_EVENT_RETENTION_DAYS` sweep target (DATA_RETENTION_AND_PRIVACY.md
+   * "Job records and stage events"). Only terminal jobs are eligible — a
+   * running or queued job is never deleted regardless of age. Cascades to
+   * `job_stage_events`. Returns the count removed for the sweeper's log line.
+   */
+  async deleteTerminalOlderThan(olderThan: Date): Promise<number> {
+    const rows = await query<{ id: string }>(
+      this.pool,
+      "DELETE FROM processing_jobs WHERE status IN ('completed','failed','cancelled') AND completed_at < $1 RETURNING id",
+      [olderThan]
+    );
+    return rows.length;
+  }
 }

@@ -97,4 +97,31 @@ export class SnapshotsRepository {
       [id, errorCode]
     );
   }
+
+  /** Newest first — `snapshot.prune` keeps the front of this list. */
+  async listByRepoOrderedDesc(repoId: string): Promise<SnapshotRow[]> {
+    return query<SnapshotRow>(this.pool, "SELECT * FROM repository_snapshots WHERE repo_id = $1 ORDER BY created_at DESC", [
+      repoId,
+    ]);
+  }
+
+  /** Repos whose snapshot count exceeds `retainCount` — what `SnapshotPruneSchedulerService` sweeps for (SCOPE_LIMITS.md `SNAPSHOT_RETENTION_COUNT`). */
+  async listRepoIdsExceedingRetention(retainCount: number, limit: number): Promise<string[]> {
+    const rows = await query<{ repo_id: string }>(
+      this.pool,
+      `SELECT s.repo_id
+       FROM repository_snapshots s
+       JOIN repositories r ON r.id = s.repo_id AND r.deleted_at IS NULL
+       GROUP BY s.repo_id
+       HAVING count(*) > $1
+       LIMIT $2`,
+      [retainCount, limit]
+    );
+    return rows.map((row) => row.repo_id);
+  }
+
+  /** Cascades to `repository_files`, `code_symbols`, `file_dependencies`, `graph_nodes`, `graph_edges`, `graph_build_state`. Idempotent. */
+  async deleteById(id: string): Promise<void> {
+    await query(this.pool, "DELETE FROM repository_snapshots WHERE id = $1", [id]);
+  }
 }
