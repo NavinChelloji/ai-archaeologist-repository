@@ -17,6 +17,7 @@
     "@aca/contracts": "workspace:*",
     "@aca/db": "workspace:*",
     "@aca/logger": "workspace:*",
+    "@aca/metrics": "workspace:*",
     "@aca/queue": "workspace:*",
     "@aca/storage": "workspace:*",
     "@nestjs/common": "^11.2.1",

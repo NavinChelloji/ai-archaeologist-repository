@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards, UsePipes } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, UseGuards, UsePipes } from "@nestjs/common";
 import {
   InternalImportRepositoryRequestSchema,
   InternalRepositoriesListQuerySchema,
@@ -8,12 +8,15 @@ import {
   type InternalRepositoriesListQuery,
   type InternalRepositoryOwnershipQuery,
   type InternalRepositoryOwnershipResponse,
+  type InternalRepositorySnapshotsResponse,
   type RepositoriesListResponse,
   type RepositoryDto,
 } from "@aca/contracts";
 import { InternalAuthGuard } from "../../internal/internal-auth.guard";
 import { ZodValidationPipe } from "../../shared/validation/zod-validation.pipe";
+import { DeletionService } from "./deletion.service";
 import { RepositoriesService } from "./repositories.service";
+import { SnapshotPruneService } from "./snapshot-prune.service";
 
 /**
  * `/internal/*` — never routed from the public ingress, always behind
@@ -23,7 +26,11 @@ import { RepositoriesService } from "./repositories.service";
 @Controller("internal/repositories")
 @UseGuards(InternalAuthGuard)
 export class RepositoriesInternalController {
-  constructor(private readonly repositories: RepositoriesService) {}
+  constructor(
+    private readonly repositories: RepositoriesService,
+    private readonly deletion: DeletionService,
+    private readonly prune: SnapshotPruneService
+  ) {}
 
   @Post("import")
   @UsePipes(new ZodValidationPipe(InternalImportRepositoryRequestSchema))
@@ -50,5 +57,26 @@ export class RepositoriesInternalController {
   ): Promise<InternalRepositoryOwnershipResponse> {
     const owns = await this.repositories.isOwnedBy(repoId, query.userId);
     return { owns };
+  }
+
+  /**
+   * Fast, synchronous half of deletion (DATA_RETENTION_AND_PRIVACY.md
+   * "Repository deletion" step 1) — `api` calls this directly so the
+   * repository disappears from the user's list immediately. The full
+   * cascade and S3 cleanup happen asynchronously off `repo.deleted`, which
+   * `api` publishes right after this call returns.
+   */
+  @Delete(":repoId")
+  @HttpCode(202)
+  async softDelete(@Param("repoId") repoId: string): Promise<{ status: "deleting" }> {
+    await this.repositories.softDelete(repoId);
+    return { status: "deleting" };
+  }
+
+  /** The snapshot ids `indexer` currently retains for a repo — `ai` uses this after `snapshot.prune` to know which `snapshot_chunks` rows are still valid. */
+  @Get(":repoId/snapshots")
+  async listSnapshots(@Param("repoId") repoId: string): Promise<InternalRepositorySnapshotsResponse> {
+    const snapshotIds = await this.prune.listRetainedSnapshotIds(repoId);
+    return { snapshotIds };
   }
 }

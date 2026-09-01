@@ -92,6 +92,11 @@ export class RepositoriesService {
     return this.repositories.isOwnedBy(repoId, userId);
   }
 
+  /** DATA_RETENTION_AND_PRIVACY.md "Repository deletion" step 1 — immediate, synchronous, idempotent. */
+  async softDelete(repoId: string): Promise<void> {
+    await this.repositories.softDelete(repoId);
+  }
+
   /** Called by the Pipeline module on `repo.processing.completed` (CODEBASE.md "Snapshot Lifecycle" — cutover is atomic). */
   async activateSnapshot(repoId: string, snapshotId: string): Promise<void> {
     await this.repositories.activateSnapshot(repoId, snapshotId);

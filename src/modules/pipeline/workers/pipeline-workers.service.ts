@@ -3,10 +3,14 @@ import type { Pool } from "pg";
 import type PgBoss from "pg-boss";
 import { DEFAULT_RETRY_POLICY, ensureProductQueue, subscribeJob } from "@aca/queue";
 import type { Logger } from "@aca/logger";
+import type { StageMetrics } from "@aca/metrics";
+import type { TypedEnvelope } from "@aca/contracts";
 import { APP_LOGGER, PG_BOSS, PG_POOL } from "../../../shared/infra.module";
+import { STAGE_METRICS } from "../../../shared/metrics/metrics.module";
 import { PipelineService } from "../pipeline.service";
 
 const CONSUMER = "indexer.pipeline";
+const MS_PER_SECOND = 1000;
 
 /**
  * Registers every queue this module owns and subscribes its consumer side
@@ -20,8 +24,16 @@ export class PipelineWorkersService implements OnApplicationBootstrap {
     @Inject(PG_BOSS) private readonly boss: PgBoss,
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_LOGGER) private readonly logger: Logger,
+    @Inject(STAGE_METRICS) private readonly stageMetrics: StageMetrics,
     private readonly pipeline: PipelineService
   ) {}
+
+  /** Records the stage-duration histogram from the envelope's own `StageProgress.durationMs` — no PipelineService changes needed, since every terminal-or-not batch already carries it. */
+  private observeStageDuration(envelope: TypedEnvelope<
+    "repo.snapshot.created" | "repo.files.indexed" | "repo.symbols.extracted" | "repo.dependencies.extracted" | "repo.graph.built" | "repo.embeddings.completed"
+  >): void {
+    this.stageMetrics.stageDuration.observe({ stage: envelope.payload.stage }, envelope.payload.durationMs / MS_PER_SECOND);
+  }
 
   async onApplicationBootstrap(): Promise<void> {
     const consumedJobs = [
@@ -54,42 +66,60 @@ export class PipelineWorkersService implements OnApplicationBootstrap {
       this.boss,
       "repo.snapshot.created",
       { consumer: `${CONSUMER}.snapshot_created`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleSnapshotCreated(envelope)
+      async (envelope) => {
+        await this.pipeline.handleSnapshotCreated(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(
       this.boss,
       "repo.files.indexed",
       { consumer: `${CONSUMER}.files_indexed`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleFilesIndexed(envelope)
+      async (envelope) => {
+        await this.pipeline.handleFilesIndexed(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(
       this.boss,
       "repo.symbols.extracted",
       { consumer: `${CONSUMER}.symbols_extracted`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleSymbolsExtracted(envelope)
+      async (envelope) => {
+        await this.pipeline.handleSymbolsExtracted(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(
       this.boss,
       "repo.dependencies.extracted",
       { consumer: `${CONSUMER}.dependencies_extracted`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleDependenciesExtracted(envelope)
+      async (envelope) => {
+        await this.pipeline.handleDependenciesExtracted(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(
       this.boss,
       "repo.graph.built",
       { consumer: `${CONSUMER}.graph_built`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleGraphBuilt(envelope)
+      async (envelope) => {
+        await this.pipeline.handleGraphBuilt(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(
       this.boss,
       "repo.embeddings.completed",
       { consumer: `${CONSUMER}.embeddings_completed`, pool: this.pool, logger: this.logger },
-      (envelope) => this.pipeline.handleEmbeddingsCompleted(envelope)
+      async (envelope) => {
+        await this.pipeline.handleEmbeddingsCompleted(envelope);
+        this.observeStageDuration(envelope);
+      }
     );
 
     await subscribeJob(

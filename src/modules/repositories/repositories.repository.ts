@@ -128,6 +128,47 @@ export class RepositoriesRepository {
     return Number(rows[0]?.count ?? "0");
   }
 
+  /**
+   * Immediate, synchronous half of deletion (DATA_RETENTION_AND_PRIVACY.md
+   * "Repository deletion" step 1) — the repository disappears from the
+   * user's list right away. Idempotent: a second call against an
+   * already-soft-deleted row matches zero rows.
+   */
+  async softDelete(repoId: string): Promise<void> {
+    await query(
+      this.pool,
+      "UPDATE repositories SET deleted_at = now(), active_snapshot_id = NULL, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
+      [repoId]
+    );
+  }
+
+  /**
+   * The cascading half of deletion, run from the `repo.deleted` consumer.
+   * `ON DELETE CASCADE` on every child table (snapshots, processing jobs,
+   * files, symbols, dependencies, graph nodes/edges) means this one
+   * statement removes all of `indexer`'s data for the repository. Idempotent
+   * — deleting an already-gone id matches zero rows.
+   */
+  async hardDelete(repoId: string): Promise<void> {
+    await query(this.pool, "DELETE FROM repositories WHERE id = $1", [repoId]);
+  }
+
+  /**
+   * Safety net for account deletion (DATA_RETENTION_AND_PRIVACY.md "Account
+   * deletion"): `api` enumerates a user's repos to build the `repoIds` on
+   * `user.deleted`, but a repo imported in the race window between that
+   * enumeration and this handler running would otherwise survive. Re-querying
+   * by `owner_user_id` here catches it.
+   */
+  async listAllIdsByOwner(ownerUserId: string): Promise<string[]> {
+    const rows = await query<{ id: string }>(
+      this.pool,
+      "SELECT id FROM repositories WHERE owner_user_id = $1 AND deleted_at IS NULL",
+      [ownerUserId]
+    );
+    return rows.map((row) => row.id);
+  }
+
   async listByOwner(input: ListByOwnerInput): Promise<RepositoryRow[]> {
     if (input.cursor) {
       return query<RepositoryRow>(

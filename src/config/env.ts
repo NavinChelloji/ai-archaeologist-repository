@@ -28,6 +28,9 @@ const IndexerEnvSchema = z.object({
   MAX_FILE_SIZE_KB: z.coerce.number().int().positive().default(512),
   MAX_DIRECTORY_DEPTH: z.coerce.number().int().positive().default(32),
   SNAPSHOT_RETENTION_COUNT: z.coerce.number().int().positive().default(2),
+  // Stage 10 — DEVELOPMENT_STAGES.md "`snapshot.prune` scheduled job honouring retention".
+  SNAPSHOT_PRUNE_SWEEP_SECONDS: z.coerce.number().int().positive().default(3600),
+  SNAPSHOT_PRUNE_BATCH_SIZE: z.coerce.number().int().positive().default(50),
   TEMP_WORK_DIR: z.string().default("/tmp/aca"),
   DOWNLOAD_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(600),
 
@@ -49,6 +52,8 @@ const IndexerEnvSchema = z.object({
   STAGE_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(1800),
   STALLED_JOB_SWEEP_SECONDS: z.coerce.number().int().positive().default(60),
   JOB_EVENT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+  JOB_RETENTION_SWEEP_SECONDS: z.coerce.number().int().positive().default(86400),
+  QUEUE_METRICS_SWEEP_SECONDS: z.coerce.number().int().positive().default(30),
 });
 
 export type IndexerEnv = z.infer<typeof IndexerEnvSchema>;

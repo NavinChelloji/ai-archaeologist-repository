@@ -3,6 +3,7 @@ import { APP_FILTER } from "@nestjs/core";
 import { ConfigModule } from "./config/config.module";
 import { InfraModule } from "./shared/infra.module";
 import { HealthModule } from "./shared/health/health.module";
+import { MetricsModule } from "./shared/metrics/metrics.module";
 import { AllExceptionsFilter } from "./shared/errors/all-exceptions.filter";
 import { InternalModule } from "./internal/internal.module";
 import { SystemModule } from "./modules/system/system.module";
@@ -16,6 +17,7 @@ import { GraphModule } from "./modules/graph/graph.module";
     ConfigModule,
     InfraModule,
     HealthModule,
+    MetricsModule,
     InternalModule,
     SystemModule,
     RepositoriesModule,
